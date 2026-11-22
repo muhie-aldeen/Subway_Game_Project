@@ -395,6 +395,20 @@ int main(int argc, char *argv[]) {
   double lastFrameTime = glfwGetTime();
   PlayerCamera player;
   mat4 viewMatrix(1.0f);
+  const float lanePositions[3] = {-2.0f, 0.0f, 2.0f};
+  int currentLane = 1;
+  bool leftKeyDown = false;
+  bool rightKeyDown = false;
+  const float laneMoveSpeed = 10.0f;
+  bool jumpKeyDown = false;
+  float jumpVelocity = 0.0f;
+  const float jumpInitialVelocity = 7.0f;
+  const float gravity = -20.0f;
+  const float groundHeight = 0.0f;
+  const float standingHeightScale = 1.0f;
+  const float slidingHeightScale = 0.5f;
+  const float slideBlendSpeed = 14.0f;
+  float playerHeightScale = standingHeightScale;
 
   while (!glfwWindowShouldClose(window)) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
@@ -403,9 +417,66 @@ int main(int argc, char *argv[]) {
     double thisFrameTime = glfwGetTime();
     double deltaTime = thisFrameTime - lastFrameTime;
     lastFrameTime = thisFrameTime;
+    float frameDeltaTime =
+        std::min(static_cast<float>(deltaTime), 0.05f);
 
-    // حركة اللاعب للأمام مؤقتاً للتجربة
-    player.pos.z -= 6.0f * (float)deltaTime;
+    bool leftKeyPressed =
+        glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS ||
+        glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS;
+    bool rightKeyPressed =
+        glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS ||
+        glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS;
+
+    if (leftKeyPressed && !leftKeyDown)
+      currentLane = std::max(0, currentLane - 1);
+    if (rightKeyPressed && !rightKeyDown)
+      currentLane = std::min(2, currentLane + 1);
+
+    leftKeyDown = leftKeyPressed;
+    rightKeyDown = rightKeyPressed;
+
+    float laneBlend =
+        1.0f - exp(-laneMoveSpeed * static_cast<float>(deltaTime));
+    player.pos.x +=
+        (lanePositions[currentLane] - player.pos.x) * laneBlend;
+
+    bool jumpKeyPressed =
+        glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS ||
+        glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS ||
+        glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS;
+
+    if (jumpKeyPressed && !jumpKeyDown &&
+        player.pos.y <= groundHeight + 0.001f)
+      jumpVelocity = jumpInitialVelocity;
+
+    jumpKeyDown = jumpKeyPressed;
+
+    jumpVelocity += gravity * frameDeltaTime;
+    player.pos.y += jumpVelocity * frameDeltaTime;
+
+    if (player.pos.y < groundHeight) {
+      player.pos.y = groundHeight;
+      jumpVelocity = 0.0f;
+    }
+
+    bool slidePressed =
+        glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS ||
+        glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+        glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS;
+
+    float targetHeightScale =
+        slidePressed ? slidingHeightScale : standingHeightScale;
+    float slideBlend =
+        1.0f - exp(-slideBlendSpeed * frameDeltaTime);
+    playerHeightScale +=
+        (targetHeightScale - playerHeightScale) * slideBlend;
+    player.eyeHeight =
+        1.7f * playerHeightScale;
+
+    float forwardVelocity =
+        static_cast<float>(thisFrameTime) *
+        (1.0f + sin(static_cast<float>(thisFrameTime)));
+    player.pos.z -= forwardVelocity * frameDeltaTime;
 
     // تحديث الكاميرا وإرسالها للـ Shader
     viewMatrix = player.getViewMatrix();
