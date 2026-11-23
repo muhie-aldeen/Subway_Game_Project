@@ -53,8 +53,8 @@ target_include_directories(OpenGL.SharedModule PUBLIC
 
 target_link_libraries(OpenGL.SharedModule PUBLIC
     OpenGL::GL
+    ${CMAKE_SOURCE_DIR}/OpenGL.SharedModule/dependencies/libs/glfw3.lib
 )
-
 # Automatically find all .cpp and .c files in the GLProject folder
 file(GLOB GLPROJECT_SOURCES
     "GLProject/*.cpp"
@@ -81,23 +81,22 @@ target_include_directories(GLProject PRIVATE
     OpenGL.SharedModule/dependencies/include/glad
 )
 
+
 if(WIN32)
 target_link_libraries(GLProject PRIVATE
     OpenGL.SharedModule
-    glfw3
-    assimp
-    spdlog
+    "${CMAKE_CURRENT_SOURCE_DIR}/OpenGL.SharedModule/dependencies/libs/glfw3.lib"
     OpenGL::GL
 )
 else()
 target_link_libraries(GLProject PRIVATE
     OpenGL.SharedModule
     glfw
-    assimp
-    spdlog
     OpenGL::GL
 )
 endif()
+
+
 
 add_custom_command(
     TARGET GLProject POST_BUILD
