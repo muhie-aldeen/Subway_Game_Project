@@ -44,3 +44,45 @@ void Model::draw(GLint drawingMode) {
     glBindVertexArray(VAO);
     glDrawArrays(drawingMode, 0, verticesCount);
 }
+
+TexturedModel::TexturedModel(vector<vec3> positions, vector<vec3> colors,
+                             vector<vec2> texCoords, GLuint textureId)
+    : textureId(textureId), verticesCount(positions.size()) {
+    vector<float> vertices;
+    vertices.reserve(positions.size() * 8);
+    for (size_t i = 0; i < positions.size(); ++i) {
+        vertices.push_back(positions[i].x);
+        vertices.push_back(positions[i].y);
+        vertices.push_back(positions[i].z);
+        vertices.push_back(colors[i].x);
+        vertices.push_back(colors[i].y);
+        vertices.push_back(colors[i].z);
+        vertices.push_back(texCoords[i].x);
+        vertices.push_back(texCoords[i].y);
+    }
+
+    glGenVertexArrays(1, &VAO);
+    glBindVertexArray(VAO);
+
+    GLuint VBO;
+    glGenBuffers(1, &VBO);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float),
+                 vertices.data(), GL_STATIC_DRAW);
+
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float),
+                          (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float),
+                          (void*)(6 * sizeof(float)));
+    glEnableVertexAttribArray(2);
+}
+
+void TexturedModel::draw(GLint drawingMode) {
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, textureId);
+    glBindVertexArray(VAO);
+    glDrawArrays(drawingMode, 0, verticesCount);
+}

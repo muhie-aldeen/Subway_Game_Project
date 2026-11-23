@@ -103,5 +103,11 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_directory
             ${CMAKE_CURRENT_SOURCE_DIR}/GLProject
             $<TARGET_FILE_DIR:GLProject>
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/textures
+            $<TARGET_FILE_DIR:GLProject>/textures
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${CMAKE_CURRENT_SOURCE_DIR}/models
+            $<TARGET_FILE_DIR:GLProject>/models
     COMMENT "Syncing GLProject directory contents and assets to build output..."
 )

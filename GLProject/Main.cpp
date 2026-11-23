@@ -3,14 +3,21 @@
 #define WINDOW_WIDTH 800
 
 #include "libs/glad_loader_docs.h"
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <vector>
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_opengl3.h>
 
 #include "model.h"
 #include "shader_program.h"
@@ -40,6 +47,103 @@ struct PlayerCamera {
     return lookAt(eyePos, eyePos + front, up);
   }
 };
+
+// صندوق إحاطة محوري المحاور يُستخدم للتصادم بين اللاعب والعوائق.
+struct AABB {
+  vec3 min;
+  vec3 max;
+};
+
+GLuint loadTexture(const char *path, bool repeat) {
+  stbi_set_flip_vertically_on_load(true);
+  int width, height, channels;
+  unsigned char *data =
+      stbi_load(path, &width, &height, &channels, 4);
+  if (!data)
+    return 0;
+
+  GLuint texture;
+  glGenTextures(1, &texture);
+  glBindTexture(GL_TEXTURE_2D, texture);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S,
+                  repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T,
+                  repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                  GL_LINEAR_MIPMAP_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
+               GL_RGBA, GL_UNSIGNED_BYTE, data);
+  glGenerateMipmap(GL_TEXTURE_2D);
+  stbi_image_free(data);
+  return texture;
+}
+
+struct ObjMesh {
+  vector<vec3> positions;
+  vector<vec3> colors;
+  vector<vec2> texCoords;
+};
+
+ObjMesh loadObj(const char *path, vec3 color) {
+  ObjMesh mesh;
+  vector<vec3> vertices;
+  ifstream file(path);
+  if (!file)
+    return mesh;
+
+  string line;
+  while (getline(file, line)) {
+    istringstream stream(line);
+    string type;
+    stream >> type;
+    if (type == "v") {
+      vec3 vertex;
+      stream >> vertex.x >> vertex.y >> vertex.z;
+      vertices.push_back(vertex);
+    } else if (type == "f") {
+      vector<int> indices;
+      string value;
+      while (stream >> value) {
+        size_t slash = value.find('/');
+        indices.push_back(stoi(value.substr(0, slash)) - 1);
+      }
+      if (indices.size() >= 3) {
+        for (size_t i = 1; i + 1 < indices.size(); ++i) {
+          vec3 faceVertices[3] = {
+              vertices[indices[0]],
+              vertices[indices[i]],
+              vertices[indices[i + 1]]};
+          for (const vec3 &faceVertex : faceVertices) {
+            mesh.positions.push_back(faceVertex);
+            mesh.colors.push_back(color);
+            mesh.texCoords.push_back({
+                (faceVertex.x + 1.0f) * 0.5f,
+                (faceVertex.z + 2.5f) / 5.0f});
+          }
+        }
+      }
+    }
+  }
+  return mesh;
+}
+
+bool checkCollision(const AABB &a, const AABB &b) {
+  return (a.min.x <= b.max.x && a.max.x >= b.min.x) &&
+         (a.min.y <= b.max.y && a.max.y >= b.min.y) &&
+         (a.min.z <= b.max.z && a.max.z >= b.min.z);
+}
+
+AABB getPlayerAABB(const PlayerCamera &player, float playerHeightScale) {
+  const float playerWidth = 0.9f;
+  const float standingHeight = 1.7f;
+  const float playerDepth = 0.9f;
+  const float playerHeight = standingHeight * playerHeightScale;
+
+  return {
+      {player.pos.x - playerWidth * 0.5f, player.pos.y, player.pos.z - playerDepth * 0.5f},
+      {player.pos.x + playerWidth * 0.5f, player.pos.y + playerHeight, player.pos.z + playerDepth * 0.5f}};
+}
 
 // Gets called whenever the application window is resized
 void windowResizeCallback(GLFWwindow *window, int width, int height) {
@@ -75,6 +179,27 @@ int main(int argc, char *argv[]) {
 
   // Enable depth
   glEnable(GL_DEPTH_TEST);
+
+  GLuint trackTexture =
+      loadTexture("textures/track_ground.png", true);
+  GLuint trainFrontTexture =
+      loadTexture("textures/train_front.png", false);
+  GLuint trainSideTexture =
+      loadTexture("textures/train_side.png", false);
+  GLuint barrierTexture =
+      loadTexture("textures/barrier_hazard.png", false);
+  GLuint buildingTexture =
+      loadTexture("textures/building_facade.png", true);
+  GLuint coinTexture =
+      loadTexture("textures/gold_coin.png", false);
+
+  IMGUI_CHECKVERSION();
+  ImGui::CreateContext();
+  ImGuiIO &io = ImGui::GetIO();
+  io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+  ImGui::StyleColorsDark();
+  ImGui_ImplGlfw_InitForOpenGL(window, true);
+  ImGui_ImplOpenGL3_Init("#version 330");
 
   // تهيئة لون السماء (أزرق سماوي هادئ)
   glClearColor(0.53f, 0.81f, 0.92f, 1.0f);
@@ -303,6 +428,11 @@ int main(int argc, char *argv[]) {
   ///////////////////////////////////////////////////////////////////
 
   Model roadSegment(roadPositions, roadColors);
+  vector<vec2> roadTexCoords;
+  for (const vec3 &vertex : roadPositions)
+    roadTexCoords.push_back({vertex.x * 0.5f, -vertex.z * 0.25f});
+  TexturedModel texturedRoadSegment(
+      roadPositions, roadColors, roadTexCoords, trackTexture);
 
   if (GLenum err = glGetError() != 0) {
     return err;
@@ -351,6 +481,101 @@ int main(int argc, char *argv[]) {
   Model trainObstacle(trainPos, trainCol);
   ///////////////////////////////////////////////////////////////////////
 
+  // عملات تجريبية موزعة على المسارات الثلاثة.
+  vector<vec3> coinPos, coinCol;
+  vec3 coinColor{1.0f, 0.82f, 0.05f};
+  const int coinSides = 16;
+  const float coinRadius = 0.30f;
+  const float coinHalfDepth = 0.055f;
+  for (int i = 0; i < coinSides; ++i) {
+    float angleA = radians(static_cast<float>(i) * 360.0f / coinSides);
+    float angleB = radians(static_cast<float>(i + 1) * 360.0f / coinSides);
+    vec3 a(cos(angleA) * coinRadius, sin(angleA) * coinRadius, -coinHalfDepth);
+    vec3 b(cos(angleB) * coinRadius, sin(angleB) * coinRadius, -coinHalfDepth);
+    vec3 c(cos(angleB) * coinRadius, sin(angleB) * coinRadius, coinHalfDepth);
+    vec3 d(cos(angleA) * coinRadius, sin(angleA) * coinRadius, coinHalfDepth);
+    coinPos.insert(coinPos.end(), {a, b, c, a, c, d});
+    coinPos.insert(coinPos.end(), {a, d, c, b, c, d});
+    for (int v = 0; v < 12; ++v)
+      coinCol.push_back(coinColor);
+  }
+  vector<vec2> coinTexCoords;
+  for (const vec3 &vertex : coinPos)
+    coinTexCoords.push_back({vertex.x * 0.5f + 0.5f,
+                             vertex.y * 0.5f + 0.5f});
+
+  struct Coin {
+    float laneX;
+    float z;
+    bool isCollected;
+  };
+  Coin coins[] = {
+      {-2.0f, -6.0f, false},
+      {-2.0f, -7.0f, false},
+      {0.0f, -12.0f, false},
+      {0.0f, -13.0f, false},
+      {2.0f, -18.0f, false},
+      {-2.0f, -23.0f, false},
+      {2.0f, -29.0f, false}};
+
+  ObjMesh coinObj = loadObj("models/coin.obj", coinColor);
+  TexturedModel coinModel(
+      coinObj.positions.empty() ? coinPos : coinObj.positions,
+      coinObj.positions.empty() ? coinCol : coinObj.colors,
+      coinObj.positions.empty()
+          ? coinTexCoords
+          : coinObj.texCoords,
+      coinTexture);
+
+  ObjMesh trainObj = loadObj("models/train.obj",
+                             vec3(0.80f, 0.18f, 0.18f));
+  vector<vec2> trainTexCoords;
+  for (const vec3 &vertex : trainObj.positions)
+    trainTexCoords.push_back({(vertex.x + 0.85f) / 1.7f,
+                              vertex.y / 2.45f});
+  TexturedModel trainModel(
+      trainObj.positions.empty() ? trainPos : trainObj.positions,
+      trainObj.positions.empty() ? trainCol : trainObj.colors,
+      trainObj.positions.empty()
+          ? vector<vec2>(trainPos.size(), vec2(0.5f, 0.5f))
+          : trainTexCoords,
+      trainObj.positions.empty() ? barrierTexture : trainFrontTexture);
+  TexturedModel trainSideModel(
+      trainObj.positions.empty() ? trainPos : trainObj.positions,
+      trainObj.positions.empty() ? trainCol : trainObj.colors,
+      trainObj.positions.empty()
+          ? vector<vec2>(trainPos.size(), vec2(0.5f, 0.5f))
+          : trainTexCoords,
+      trainObj.positions.empty() ? barrierTexture : trainSideTexture);
+
+  vector<vec3> buildingPos;
+  vector<vec3> buildingCol;
+  addBoxToBuffers(buildingPos, buildingCol,
+                  {-4.8f, 1.6f, 0.0f},
+                  {1.2f, 3.2f, 40.0f},
+                  vec3(0.48f, 0.52f, 0.58f));
+  addBoxToBuffers(buildingPos, buildingCol,
+                  {4.8f, 1.6f, 0.0f},
+                  {1.2f, 3.2f, 40.0f},
+                  vec3(0.48f, 0.52f, 0.58f));
+  vector<vec2> buildingTexCoords;
+  for (const vec3 &vertex : buildingPos)
+    buildingTexCoords.push_back({vertex.x * 0.5f, -vertex.z * 0.05f});
+  TexturedModel buildingModel(buildingPos, buildingCol,
+                              buildingTexCoords, buildingTexture);
+
+  vector<vec2> jumpTexCoords(jumpPos.size());
+  for (size_t i = 0; i < jumpPos.size(); ++i)
+    jumpTexCoords[i] = {(jumpPos[i].x + 1.1f) / 2.2f,
+                        jumpPos[i].y / 1.0f};
+  TexturedModel texturedJump(jumpPos, jumpCol, jumpTexCoords, barrierTexture);
+
+  vector<vec2> slideTexCoords(slidePos.size());
+  for (size_t i = 0; i < slidePos.size(); ++i)
+    slideTexCoords[i] = {(slidePos[i].x + 1.75f) / 3.5f,
+                         slidePos[i].y / 1.6f};
+  TexturedModel texturedSlide(slidePos, slideCol, slideTexCoords, barrierTexture);
+
   // Load and link shader files
   ShaderProgram shaderProgram("shaders/shader.vert", "shaders/shader.frag");
 
@@ -370,12 +595,19 @@ int main(int argc, char *argv[]) {
       glGetUniformLocation(shaderProgram.getProgram(), "perspective");
   GLuint timeLocation =
       glGetUniformLocation(shaderProgram.getProgram(), "time");
+  GLuint cameraPositionLocation =
+      glGetUniformLocation(shaderProgram.getProgram(), "cameraPosition");
+  GLuint diffuseTextureLocation =
+      glGetUniformLocation(shaderProgram.getProgram(), "diffuseTexture");
+  GLuint useTextureLocation =
+      glGetUniformLocation(shaderProgram.getProgram(), "useTexture");
 
   if (GLenum err = glGetError() != 0) {
     return err;
   }
 
   glUseProgram(shaderProgram.getProgram());
+  glUniform1i(diffuseTextureLocation, 0);
 
   float fieldOfView = radians(45.0f);
   float aspectRatio = (float)WINDOW_WIDTH / (float)WINDOW_HEIGHT;
@@ -409,6 +641,45 @@ int main(int argc, char *argv[]) {
   const float slidingHeightScale = 0.5f;
   const float slideBlendSpeed = 14.0f;
   float playerHeightScale = standingHeightScale;
+  int collisionCount = 0;
+  int score = 0;
+  bool isGameOver = false;
+  bool retryKeyDown = false;
+  double gameTime = 0.0;
+
+  enum class ObstacleType { Jump, Slide, Train };
+  struct Obstacle {
+    float laneX;
+    float z;
+    ObstacleType type;
+  };
+
+  const Obstacle obstaclePositions[] = {
+      {-2.0f, -4.0f, ObstacleType::Jump},
+      {0.0f, -9.0f, ObstacleType::Slide},
+      {2.0f, -15.0f, ObstacleType::Train},
+      {-2.0f, -21.0f, ObstacleType::Slide},
+      {2.0f, -26.5f, ObstacleType::Jump},
+      {0.0f, -32.0f, ObstacleType::Train},
+      {-2.0f, -37.5f, ObstacleType::Jump}};
+
+  auto retryGame = [&]() {
+    player.pos = vec3(0.0f, groundHeight, 0.0f);
+    player.eyeHeight = 1.7f;
+    currentLane = 1;
+    jumpVelocity = 0.0f;
+    jumpKeyDown = false;
+    leftKeyDown = false;
+    rightKeyDown = false;
+    playerHeightScale = standingHeightScale;
+    collisionCount = 0;
+    score = 0;
+    gameTime = 0.0;
+    isGameOver = false;
+    lastFrameTime = glfwGetTime();
+    for (Coin &coin : coins)
+      coin.isCollected = false;
+  };
 
   while (!glfwWindowShouldClose(window)) {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
@@ -420,87 +691,266 @@ int main(int argc, char *argv[]) {
     float frameDeltaTime =
         std::min(static_cast<float>(deltaTime), 0.05f);
 
-    bool leftKeyPressed =
-        glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS ||
-        glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS;
-    bool rightKeyPressed =
-        glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS ||
-        glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS;
+    bool retryPressed = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
+    if (isGameOver && retryPressed && !retryKeyDown)
+      retryGame();
+    retryKeyDown = retryPressed;
 
-    if (leftKeyPressed && !leftKeyDown)
-      currentLane = std::max(0, currentLane - 1);
-    if (rightKeyPressed && !rightKeyDown)
-      currentLane = std::min(2, currentLane + 1);
+    int currentSeg = (int)floor(-player.pos.z / segmentLength);
 
-    leftKeyDown = leftKeyPressed;
-    rightKeyDown = rightKeyPressed;
+    if (!isGameOver) {
+      gameTime += frameDeltaTime;
 
-    float laneBlend =
-        1.0f - exp(-laneMoveSpeed * static_cast<float>(deltaTime));
-    player.pos.x +=
-        (lanePositions[currentLane] - player.pos.x) * laneBlend;
+      bool leftKeyPressed =
+          glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS ||
+          glfwGetKey(window, GLFW_KEY_LEFT) == GLFW_PRESS;
+      bool rightKeyPressed =
+          glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS ||
+          glfwGetKey(window, GLFW_KEY_RIGHT) == GLFW_PRESS;
 
-    bool jumpKeyPressed =
-        glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS ||
-        glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS ||
-        glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS;
+      if (leftKeyPressed && !leftKeyDown)
+        currentLane = std::max(0, currentLane - 1);
+      if (rightKeyPressed && !rightKeyDown)
+        currentLane = std::min(2, currentLane + 1);
 
-    if (jumpKeyPressed && !jumpKeyDown &&
-        player.pos.y <= groundHeight + 0.001f)
-      jumpVelocity = jumpInitialVelocity;
+      leftKeyDown = leftKeyPressed;
+      rightKeyDown = rightKeyPressed;
 
-    jumpKeyDown = jumpKeyPressed;
+      float laneBlend =
+          1.0f - exp(-laneMoveSpeed * static_cast<float>(deltaTime));
+      player.pos.x +=
+          (lanePositions[currentLane] - player.pos.x) * laneBlend;
 
-    jumpVelocity += gravity * frameDeltaTime;
-    player.pos.y += jumpVelocity * frameDeltaTime;
+      bool jumpKeyPressed =
+          glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS ||
+          glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS ||
+          glfwGetKey(window, GLFW_KEY_UP) == GLFW_PRESS;
 
-    if (player.pos.y < groundHeight) {
-      player.pos.y = groundHeight;
-      jumpVelocity = 0.0f;
+      if (jumpKeyPressed && !jumpKeyDown &&
+          player.pos.y <= groundHeight + 0.001f)
+        jumpVelocity = jumpInitialVelocity;
+
+      jumpKeyDown = jumpKeyPressed;
+
+      jumpVelocity += gravity * frameDeltaTime;
+      player.pos.y += jumpVelocity * frameDeltaTime;
+
+      if (player.pos.y < groundHeight) {
+        player.pos.y = groundHeight;
+        jumpVelocity = 0.0f;
+      }
+
+      bool slidePressed =
+          glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS ||
+          glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+          glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS;
+
+      float targetHeightScale =
+          slidePressed ? slidingHeightScale : standingHeightScale;
+      float slideBlend =
+          1.0f - exp(-slideBlendSpeed * frameDeltaTime);
+      playerHeightScale +=
+          (targetHeightScale - playerHeightScale) * slideBlend;
+      player.eyeHeight =
+          1.7f * playerHeightScale;
+
+      float forwardVelocity =
+          static_cast<float>(gameTime) *
+          (1.0f + sin(static_cast<float>(gameTime)));
+      player.pos.z -= forwardVelocity * frameDeltaTime;
+
+      // فحص التصادم الديناميكي مع عوائق قطع الطريق في المحاور X/Y/Z.
+      currentSeg = (int)floor(-player.pos.z / segmentLength);
+      AABB playerAABB = getPlayerAABB(player, playerHeightScale);
+      for (int i = currentSeg - 1; i < currentSeg + 5 && !isGameOver; ++i) {
+        for (const Obstacle &obstacle : obstaclePositions) {
+          float worldZ = obstacle.z - i * segmentLength;
+          AABB obstacleAABB;
+
+          if (obstacle.type == ObstacleType::Jump) {
+            obstacleAABB = {
+                {obstacle.laneX - 0.55f, curbHeight, worldZ - 0.4f},
+                {obstacle.laneX + 0.55f, curbHeight + 0.75f, worldZ + 0.4f}};
+          } else if (obstacle.type == ObstacleType::Slide) {
+            const float clearanceY = 1.05f;
+            const float beamThickness = 0.35f;
+            const float beamCenterY =
+                curbHeight + clearanceY + beamThickness * 0.5f;
+            obstacleAABB = {
+                {obstacle.laneX - 0.875f, beamCenterY - beamThickness * 0.5f, worldZ - 0.35f},
+                {obstacle.laneX + 0.875f, beamCenterY + beamThickness * 0.5f, worldZ + 0.35f}};
+          } else {
+            obstacleAABB = {
+                {obstacle.laneX - 0.65f, curbHeight, worldZ - 2.25f},
+                {obstacle.laneX + 0.65f, curbHeight + 2.1f, worldZ + 2.25f}};
+          }
+
+          if (checkCollision(playerAABB, obstacleAABB)) {
+            ++collisionCount;
+            isGameOver = true;
+            break;
+          }
+        }
+      }
+
+      // فحص العملات الحالية في قطع الطريق المعروضة.
+      if (!isGameOver) {
+        AABB playerAABB = getPlayerAABB(player, playerHeightScale);
+        for (int i = currentSeg - 1; i < currentSeg + 5; ++i) {
+          for (Coin &coin : coins) {
+            if (coin.isCollected)
+              continue;
+
+            float worldZ = coin.z - i * segmentLength;
+            AABB coinAABB = {
+                {coin.laneX - 0.25f, 0.75f, worldZ - 0.25f},
+                {coin.laneX + 0.25f, 1.25f, worldZ + 0.25f}};
+            if (checkCollision(playerAABB, coinAABB)) {
+              coin.isCollected = true;
+              ++score;
+            }
+          }
+        }
+      }
     }
-
-    bool slidePressed =
-        glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS ||
-        glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
-        glfwGetKey(window, GLFW_KEY_DOWN) == GLFW_PRESS;
-
-    float targetHeightScale =
-        slidePressed ? slidingHeightScale : standingHeightScale;
-    float slideBlend =
-        1.0f - exp(-slideBlendSpeed * frameDeltaTime);
-    playerHeightScale +=
-        (targetHeightScale - playerHeightScale) * slideBlend;
-    player.eyeHeight =
-        1.7f * playerHeightScale;
-
-    float forwardVelocity =
-        static_cast<float>(thisFrameTime) *
-        (1.0f + sin(static_cast<float>(thisFrameTime)));
-    player.pos.z -= forwardVelocity * frameDeltaTime;
 
     // تحديث الكاميرا وإرسالها للـ Shader
     viewMatrix = player.getViewMatrix();
     glUniformMatrix4fv(viewMatrixLocation, 1, GL_FALSE, &viewMatrix[0][0]);
 
-    // إرسال الزمن ومسح الشاشة
-    glUniform1f(timeLocation, (float)thisFrameTime);
+    // إرسال الزمن المجمد عند الخسارة ومسح الشاشة
+    glUniform1f(timeLocation, (float)gameTime);
+    vec3 cameraPosition =
+        player.pos + vec3(0.0f, player.eyeHeight, 0.0f);
+    glUniform3fv(cameraPositionLocation, 1, value_ptr(cameraPosition));
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     // رسم قطع الطريق بشكل لانهائي أمام اللاعب
-    int currentSeg = (int)floor(-player.pos.z / segmentLength);
     for (int i = currentSeg - 1; i < currentSeg + 5; ++i) {
       mat4 roadModel = translate(mat4(1.0f), {0.0f, 0.0f, -i * segmentLength});
       glUniformMatrix4fv(modelMatrixLocation, 1, GL_FALSE, &roadModel[0][0]);
-      roadSegment.draw(GL_TRIANGLES);
+      glUniform1i(useTextureLocation, trackTexture != 0 ? 1 : 0);
+      texturedRoadSegment.draw(GL_TRIANGLES);
+
+      mat4 buildingModelMatrix =
+          translate(mat4(1.0f), {0.0f, 0.0f, -i * segmentLength});
+      glUniformMatrix4fv(modelMatrixLocation, 1, GL_FALSE,
+                         &buildingModelMatrix[0][0]);
+      glUniform1i(useTextureLocation, buildingTexture != 0 ? 1 : 0);
+      buildingModel.draw(GL_TRIANGLES);
+
+      for (const Obstacle &obstacle : obstaclePositions) {
+        float worldZ = obstacle.z - i * segmentLength;
+        mat4 obstacleModel =
+            translate(mat4(1.0f), {obstacle.laneX, 0.0f, worldZ});
+
+        if (obstacle.type == ObstacleType::Jump) {
+          glUniformMatrix4fv(modelMatrixLocation, 1, GL_FALSE,
+                             &obstacleModel[0][0]);
+          glUniform1i(useTextureLocation, barrierTexture != 0 ? 1 : 0);
+          texturedJump.draw(GL_TRIANGLES);
+        } else if (obstacle.type == ObstacleType::Slide) {
+          glUniformMatrix4fv(modelMatrixLocation, 1, GL_FALSE,
+                             &obstacleModel[0][0]);
+          glUniform1i(useTextureLocation, barrierTexture != 0 ? 1 : 0);
+          texturedSlide.draw(GL_TRIANGLES);
+        } else {
+          glUniformMatrix4fv(modelMatrixLocation, 1, GL_FALSE,
+                             &obstacleModel[0][0]);
+          glUniform1i(useTextureLocation,
+                      trainFrontTexture != 0 ? 1 : 0);
+          if (i % 2 == 0)
+            trainModel.draw(GL_TRIANGLES);
+          else
+            trainSideModel.draw(GL_TRIANGLES);
+        }
+      }
+
+      for (const Coin &coin : coins) {
+        if (coin.isCollected)
+          continue;
+        float worldZ = coin.z - i * segmentLength;
+        mat4 coinModelMatrix =
+            translate(mat4(1.0f), {coin.laneX, 1.0f, worldZ});
+        coinModelMatrix =
+            rotate(coinModelMatrix, static_cast<float>(gameTime) * 2.6f,
+                   vec3(0.0f, 1.0f, 0.0f));
+        glUniformMatrix4fv(modelMatrixLocation, 1, GL_FALSE,
+                           &coinModelMatrix[0][0]);
+        glUniform1i(useTextureLocation, coinTexture != 0 ? 1 : 0);
+        coinModel.draw(GL_TRIANGLES);
+      }
     }
     ////////////////////////////////////
    
     ////////////////////////////////////////
 
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+
+    if (!isGameOver) {
+      ImGui::SetNextWindowPos(ImVec2(20.0f, 20.0f));
+      ImGui::SetNextWindowSize(ImVec2(0.0f, 0.0f));
+      ImGui::Begin("HUD", nullptr,
+                   ImGuiWindowFlags_NoBackground |
+                       ImGuiWindowFlags_NoDecoration |
+                       ImGuiWindowFlags_NoMove |
+                       ImGuiWindowFlags_AlwaysAutoResize |
+                       ImGuiWindowFlags_NoSavedSettings);
+      ImGui::SetWindowFontScale(1.65f);
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.20f, 1.0f));
+      ImGui::Text("Score: %d", score);
+      ImGui::PopStyleColor();
+      ImGui::End();
+    }
+
+    if (isGameOver) {
+      ImGuiStyle &style = ImGui::GetStyle();
+      style.WindowRounding = 14.0f;
+      style.FrameRounding = 8.0f;
+      style.WindowPadding = ImVec2(24.0f, 18.0f);
+      style.ItemSpacing = ImVec2(12.0f, 12.0f);
+
+      ImVec2 displaySize = io.DisplaySize;
+      ImGui::SetNextWindowPos(
+          ImVec2(displaySize.x * 0.5f, displaySize.y * 0.5f),
+          ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+      ImGui::SetNextWindowSize(ImVec2(320.0f, 210.0f));
+      ImGui::Begin("Game Over", nullptr,
+                   ImGuiWindowFlags_NoTitleBar |
+                       ImGuiWindowFlags_NoResize |
+                       ImGuiWindowFlags_NoMove |
+                       ImGuiWindowFlags_NoCollapse);
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.78f, 0.22f, 1.0f));
+      ImGui::SetWindowFontScale(1.35f);
+      ImGui::TextUnformatted("GAME OVER");
+      ImGui::PopStyleColor();
+      ImGui::SetWindowFontScale(1.15f);
+      ImGui::Text("Final Score: %d", score);
+      ImGui::Dummy(ImVec2(0.0f, 8.0f));
+      ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.95f, 0.55f, 0.08f, 1.0f));
+      ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1.0f, 0.68f, 0.16f, 1.0f));
+      ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.78f, 0.38f, 0.04f, 1.0f));
+      ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(18.0f, 12.0f));
+      if (ImGui::Button("Retry (R)", ImVec2(272.0f, 52.0f)))
+        retryGame();
+      ImGui::PopStyleVar();
+      ImGui::PopStyleColor(3);
+      ImGui::TextDisabled("Press R to retry");
+      ImGui::End();
+    }
+
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
     glfwSwapBuffers(window);
     glfwPollEvents();
   }
 
+  ImGui_ImplOpenGL3_Shutdown();
+  ImGui_ImplGlfw_Shutdown();
+  ImGui::DestroyContext();
   glfwTerminate();
   return 0;
 }
