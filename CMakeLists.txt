@@ -8,16 +8,9 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug CACHE STRING "Choose the type of build." FORCE)
 endif()
 
-# Find system OpenGL
+# Find system OpenGL and UCRT64 GLFW
 find_package(OpenGL REQUIRED)
-
-# Force GCC to treat .ixx extension as standard C++ files
-set_source_files_properties(
-    OpenGL.SharedModule/src/abstraction/OpenGlShape.hpp
-    OpenGL.SharedModule/src/abstraction/Drawer.hpp
-    OpenGL.SharedModule/src/abstraction/SharedModule.hpp
-    PROPERTIES LANGUAGE CXX
-)
+find_package(glfw3 CONFIG REQUIRED)
 
 #-------------------------------------------------------------------------------
 # OpenGL.SharedModule (Static Library)
@@ -37,9 +30,6 @@ add_library(OpenGL.SharedModule STATIC
     OpenGL.SharedModule/src/implementation/Drawer.cpp
     OpenGL.SharedModule/src/implementation/OpenGlShape.cpp
     OpenGL.SharedModule/src/implementation/SharedModule.cpp
-    OpenGL.SharedModule/src/abstraction/OpenGlShape.hpp
-    OpenGL.SharedModule/src/abstraction/Drawer.hpp
-    OpenGL.SharedModule/src/abstraction/SharedModule.hpp
 )
 
 target_include_directories(OpenGL.SharedModule PUBLIC
@@ -53,23 +43,19 @@ target_include_directories(OpenGL.SharedModule PUBLIC
 
 target_link_libraries(OpenGL.SharedModule PUBLIC
     OpenGL::GL
-    ${CMAKE_SOURCE_DIR}/OpenGL.SharedModule/dependencies/libs/glfw3.lib
+    glfw
 )
+
 # Automatically find all .cpp and .c files in the GLProject folder
-file(GLOB GLPROJECT_SOURCES
+file(GLOB_RECURSE GLPROJECT_SOURCES
     "GLProject/*.cpp"
     "GLProject/*.c"
-    "GLProject/**/*.cpp"
-    "GLProject/**/*.c"
 )
 
-# Pass the detected list and any extra shared source files to add_executable
+# Pass the detected list to add_executable
 add_executable(GLProject
     ${GLPROJECT_SOURCES}
-    OpenGL.SharedModule/src/glad.c
 )
-
-link_directories(OpenGL.SharedModule/dependencies/libs)
 
 target_include_directories(GLProject PRIVATE
     GLProject
@@ -81,33 +67,37 @@ target_include_directories(GLProject PRIVATE
     OpenGL.SharedModule/dependencies/include/glad
 )
 
-
-if(WIN32)
-target_link_libraries(GLProject PRIVATE
-    OpenGL.SharedModule
-    "${CMAKE_CURRENT_SOURCE_DIR}/OpenGL.SharedModule/dependencies/libs/glfw3.lib"
-    OpenGL::GL
-)
-else()
 target_link_libraries(GLProject PRIVATE
     OpenGL.SharedModule
     glfw
     OpenGL::GL
 )
-endif()
 
-
-
+# Safely sync GLProject files and optional assets folders if they exist
 add_custom_command(
     TARGET GLProject POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
             ${CMAKE_CURRENT_SOURCE_DIR}/GLProject
             $<TARGET_FILE_DIR:GLProject>
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${CMAKE_CURRENT_SOURCE_DIR}/textures
-            $<TARGET_FILE_DIR:GLProject>/textures
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${CMAKE_CURRENT_SOURCE_DIR}/models
-            $<TARGET_FILE_DIR:GLProject>/models
-    COMMENT "Syncing GLProject directory contents and assets to build output..."
+    COMMENT "Syncing GLProject directory contents to build output..."
 )
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/textures")
+    add_custom_command(
+        TARGET GLProject POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+                ${CMAKE_CURRENT_SOURCE_DIR}/textures
+                $<TARGET_FILE_DIR:GLProject>/textures
+        COMMENT "Syncing textures folder..."
+    )
+endif()
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/models")
+    add_custom_command(
+        TARGET GLProject POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
+                ${CMAKE_CURRENT_SOURCE_DIR}/models
+                $<TARGET_FILE_DIR:GLProject>/models
+        COMMENT "Syncing models folder..."
+    )
+endif()
